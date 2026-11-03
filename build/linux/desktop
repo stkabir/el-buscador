@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=El Buscador
+Comment=Analizador de disco que explica qué puedes borrar
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/el-buscador %u
+Terminal=false
+Type=Application
+Icon=el-buscador
+Categories=Utility;
+StartupWMClass=el-buscador
+
+ 

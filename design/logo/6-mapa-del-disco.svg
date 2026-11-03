@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Mapa del disco">
+  <rect x="14" y="14" width="44" height="72" rx="7" fill="currentColor"/>
+  <rect x="64" y="14" width="22" height="42" rx="6" fill="currentColor" opacity=".7"/>
+  <rect x="64" y="62" width="22" height="24" rx="6" fill="currentColor" opacity=".4"/>
+</svg>
