@@ -51,7 +51,7 @@ type ScanService struct {
 	result   *scanner.Result
 	catalog  *rules.Catalog
 	report   devtrash.Report
-	findings map[string]rules.Advice
+	findings map[string]devtrash.Finding
 }
 
 func (s *ScanService) isRunning() bool {
@@ -79,7 +79,11 @@ func (s *ScanService) Start() error {
 
 	go func() {
 		defer cancel()
-		result, err := scanner.Scan(ctx, usage.Drive+`\`, tracker)
+		root := usage.Drive + `\`
+		if scanRootOverride != "" {
+			root = scanRootOverride
+		}
+		result, err := scanner.Scan(ctx, root, tracker)
 
 		var report devtrash.Report
 		if err == nil {
@@ -95,9 +99,9 @@ func (s *ScanService) Start() error {
 		case err != nil:
 			s.state, s.err = stateFailed, err.Error()
 		default:
-			findings := make(map[string]rules.Advice, len(report.Findings))
+			findings := make(map[string]devtrash.Finding, len(report.Findings))
 			for _, finding := range report.Findings {
-				findings[finding.Path] = finding.Advice
+				findings[finding.Path] = finding
 			}
 			s.state, s.result, s.catalog, s.report, s.findings = stateDone, result, catalog, report, findings
 		}
@@ -174,9 +178,59 @@ var errNoScan = errors.New("no hay escaneo terminado")
 func (s *ScanService) addAdvice(advice map[string]rules.Advice, entries []scanner.Entry) {
 	for _, entry := range entries {
 		if finding, ok := s.findings[entry.Path]; ok {
-			advice[entry.Path] = finding
+			advice[entry.Path] = finding.Advice
 		} else if explained, ok := s.catalog.Explain(entry.Path, entry.IsDir); ok {
 			advice[entry.Path] = explained
 		}
 	}
+}
+
+func (s *ScanService) isBusy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.isRunning()
+}
+
+// scannedIsDir dice si el último escaneo vio la ruta y si era una carpeta.
+func (s *ScanService) scannedIsDir(path string) (isDir, known bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.result == nil {
+		return false, false
+	}
+	entry, ok := s.result.Find(path)
+	return entry.IsDir, ok
+}
+
+func (s *ScanService) scannedSize(path string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.result == nil {
+		return 0
+	}
+	entry, _ := s.result.Find(path)
+	return entry.Size
+}
+
+func (s *ScanService) finding(path string) (devtrash.Finding, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	finding, ok := s.findings[path]
+	return finding, ok
+}
+
+// classify devuelve el semáforo actual de una ruta. Consulta git de nuevo, así que
+// corre sin el candado.
+func (s *ScanService) classify(ctx context.Context, path string, isDir bool) (rules.Advice, bool) {
+	s.mu.Lock()
+	finding, isFinding := s.findings[path]
+	catalog := s.catalog
+	s.mu.Unlock()
+	if catalog == nil {
+		return rules.Advice{}, false
+	}
+	if isFinding {
+		return devtrash.Recheck(ctx, finding, catalog)
+	}
+	return catalog.Explain(path, isDir)
 }

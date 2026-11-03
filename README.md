@@ -2,7 +2,7 @@
 
 Analizador de disco para Windows que muestra qué ocupa espacio y explica qué puedes borrar con seguridad.
 
-En desarrollo. Hoy escanea el disco del sistema, muestra lo que más pesa, explica qué se puede borrar y detecta basura de desarrollo, en español e inglés. Solo lee: todavía no borra nada.
+En desarrollo. Hoy escanea el disco del sistema, muestra lo que más pesa, explica qué se puede borrar y detecta basura de desarrollo, en español e inglés. Limpia lo que confirmas: manda a la papelera o, en cachés, ejecuta el comando oficial de la herramienta, que te muestra antes.
 
 Límite conocido: los archivos compartidos por hard links, como los de pnpm, se cuentan una sola vez, en la primera carpeta donde aparecen. Por eso el tamaño de cada `node_modules` puede variar entre escaneos, aunque el total no se duplica.
 

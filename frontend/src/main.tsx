@@ -1,6 +1,7 @@
-import { render } from "preact";
-import { useEffect, useMemo, useState } from "preact/hooks";
-import { DiskService, ScanService } from "../bindings/el-buscador";
+import { createContext, render } from "preact";
+import { useContext, useEffect, useMemo, useState } from "preact/hooks";
+import { CleanupService, DiskService, ScanService } from "../bindings/el-buscador";
+import { CleanupDialog, focusRing } from "./cleanup";
 import { dictionary, I18n, initialLang, makeFormat, saveLang, useI18n, type Lang } from "./i18n";
 import "./style.css";
 
@@ -17,7 +18,13 @@ type Tab = "files" | "dirs" | "dev" | "explore";
 const POLL_MS = 250;
 const GB = 1024 ** 3;
 
-const focusRing = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300";
+// Selection es lo marcado para limpiar. Se comparte entre todas las vistas de
+// resultados, y removed oculta lo que ya se fue a la papelera.
+const Selection = createContext({
+  selected: new Map<string, number>(),
+  removed: new Set<string>(),
+  toggle: (_path: string, _size: number) => {},
+});
 
 function failedStatus(err: unknown): Status {
   return { state: "failed", error: String(err), progress: { files: 0, dirs: 0, size: 0, current: "" } };
@@ -75,7 +82,10 @@ function App() {
     setSummary(null);
     try {
       await ScanService.Start();
-      setStatus(await ScanService.Status());
+      const next = await ScanService.Status();
+      // Un escaneo muy corto ya pudo terminar: no quedaría nada que sondear.
+      if (next.state === "done") setSummary(await ScanService.Summary());
+      setStatus(next);
     } catch (err) {
       console.error(err);
       setStatus(failedStatus(err));
@@ -183,6 +193,34 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
   const { summary, usage, onRescan } = props;
   const { t, format } = useI18n();
   const [tab, setTab] = useState<Tab>("files");
+  const [selected, setSelected] = useState(new Map<string, number>());
+  const [removed, setRemoved] = useState(new Set<string>());
+  const [cleaning, setCleaning] = useState<string[] | null>(null);
+
+  const selection = useMemo(
+    () => ({
+      selected,
+      removed,
+      toggle(path: string, size: number) {
+        setSelected((current) => {
+          const next = new Map(current);
+          if (!next.delete(path)) next.set(path, size);
+          return next;
+        });
+      },
+    }),
+    [selected, removed],
+  );
+  const selectedSize = Array.from(selected.values()).reduce((total, size) => total + size, 0);
+
+  function onCleaned(paths: string[]) {
+    setRemoved((current) => new Set(Array.from(current).concat(paths)));
+    setSelected((current) => {
+      const next = new Map(current);
+      for (const path of paths) next.delete(path);
+      return next;
+    });
+  }
 
   const findings = summary.dev.findings ?? [];
   const used = usage ? usage.total - usage.free : 0;
@@ -195,7 +233,8 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
   ];
 
   return (
-    <main class="mx-auto flex h-full max-w-5xl flex-col gap-4 px-6 py-5">
+    <Selection.Provider value={selection}>
+    <main class="mx-auto flex h-full max-w-5xl flex-col gap-4 px-6 py-5" inert={cleaning !== null}>
       <header class="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 class="text-2xl font-semibold">{t.found(format.size(summary.size), format.number(summary.files))}</h1>
@@ -246,7 +285,70 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
         {tab === "dev" && <DevTrash findings={findings} safeSize={summary.dev.safeSize} />}
         {tab === "explore" && <Explorer root={summary.root} />}
       </div>
+
+      {selected.size > 0 && (
+        <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-gray-700 bg-gray-900 px-4 py-3" role="status">
+          <p class="text-sm font-medium">{t.selectedSummary(format.number(selected.size), format.size(selectedSize))}</p>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setSelected(new Map())}
+              class={`cursor-pointer rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-200 hover:bg-gray-800 ${focusRing}`}
+            >
+              {t.clearSelection}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCleaning(Array.from(selected.keys()))}
+              class={`cursor-pointer rounded-lg bg-emerald-400 px-5 py-2 text-sm font-semibold text-gray-950 hover:bg-emerald-300 ${focusRing}`}
+            >
+              {t.cleanSelected}
+            </button>
+          </div>
+        </div>
+      )}
     </main>
+    {cleaning && (
+      <CleanupDialog paths={cleaning} onClose={() => setCleaning(null)} onCleaned={onCleaned} onRescan={onRescan} />
+    )}
+    </Selection.Provider>
+  );
+}
+
+function canClean(advice: Advice | undefined) {
+  return !!advice && !advice.manual && (advice.level === "safe" || advice.level === "review");
+}
+
+/** Casilla de selección. Solo aparece en lo que la limpieza guiada ofrece. */
+function SelectBox({ path, name, size, advice }: { path: string; name: string; size: number; advice: Advice | undefined }) {
+  const { t } = useI18n();
+  const { selected, toggle } = useContext(Selection);
+  if (!canClean(advice)) return <span class="w-4 shrink-0" aria-hidden="true" />;
+  return (
+    <input
+      type="checkbox"
+      aria-label={t.selectItem(name)}
+      checked={selected.has(path)}
+      onChange={() => toggle(path, size)}
+      class={`mt-1 h-4 w-4 shrink-0 cursor-pointer accent-emerald-400 ${focusRing}`}
+    />
+  );
+}
+
+function RevealButton({ path }: { path: string }) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      aria-label={`${t.reveal}: ${path}`}
+      title={t.reveal}
+      onClick={() => CleanupService.Reveal(path).catch(console.error)}
+      class={`mt-0.5 shrink-0 cursor-pointer rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-gray-200 ${focusRing}`}
+    >
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      </svg>
+    </button>
   );
 }
 
@@ -269,25 +371,31 @@ function DevTrash({ findings, safeSize }: { findings: Finding[]; safeSize: numbe
 
 function FindingList({ title, findings }: { title: string; findings: Finding[] }) {
   const { t, format } = useI18n();
-  if (findings.length === 0) return null;
+  const { removed } = useContext(Selection);
+  const visible = findings.filter((finding) => !removed.has(finding.path));
+  if (visible.length === 0) return null;
   return (
     <section class="mt-3">
       <h3 class="px-2 text-sm font-medium text-gray-300">{title}</h3>
       <ul class="divide-y divide-gray-800/70">
-        {findings.map((finding) => (
-          <li key={finding.path} class="px-2 py-2">
-            <div class="flex items-baseline gap-4">
-              <span class="min-w-0 flex-1 truncate" title={finding.path}>
-                <code class="text-sm text-emerald-300">{finding.kind}</code>
-                {finding.project && <span class="text-gray-300"> · {finding.project}</span>}
-              </span>
-              <LevelChip advice={finding.advice} />
-              <span class="shrink-0 font-medium tabular-nums">{format.size(finding.size)}</span>
+        {visible.map((finding) => (
+          <li key={finding.path} class="flex items-start gap-2 px-2 py-2">
+            <SelectBox path={finding.path} name={finding.path} size={finding.size} advice={finding.advice} />
+            <div class="min-w-0 flex-1">
+              <div class="flex items-baseline gap-4">
+                <span class="min-w-0 flex-1 truncate" title={finding.path}>
+                  <code class="text-sm text-emerald-300">{finding.kind}</code>
+                  {finding.project && <span class="text-gray-300"> · {finding.project}</span>}
+                </span>
+                <LevelChip advice={finding.advice} />
+                <span class="shrink-0 font-medium tabular-nums">{format.size(finding.size)}</span>
+              </div>
+              <AdviceText advice={finding.advice} />
+              {finding.lastActivity > 0 && (
+                <p class="text-xs text-gray-500">{t.lastActivity(format.ago(finding.lastActivity))}</p>
+              )}
             </div>
-            <AdviceText advice={finding.advice} />
-            {finding.lastActivity > 0 && (
-              <p class="text-xs text-gray-500">{t.lastActivity(format.ago(finding.lastActivity))}</p>
-            )}
+            <RevealButton path={finding.path} />
           </li>
         ))}
       </ul>
@@ -359,6 +467,7 @@ function EntryList(props: {
 }) {
   const { entries, advice, showPath, scale, onOpen } = props;
   const { t, format } = useI18n();
+  const { removed } = useContext(Selection);
   const largest = scale || Math.max(1, ...entries.map((entry) => entry.size));
 
   function entrySize(entry: Entry) {
@@ -369,7 +478,7 @@ function EntryList(props: {
 
   return (
     <ul class="divide-y divide-gray-800/70">
-      {entries.map((entry) => {
+      {entries.filter((entry) => !removed.has(entry.path)).map((entry) => {
         const entryAdvice = advice?.[entry.path];
         const content = (
           <>
@@ -390,18 +499,20 @@ function EntryList(props: {
           </>
         );
         return (
-          <li key={entry.path}>
+          <li key={entry.path} class="flex items-start gap-2 px-2 py-2">
+            <SelectBox path={entry.path} name={entry.name} size={entry.size} advice={entryAdvice} />
             {entry.isDir && onOpen ? (
               <button
                 type="button"
                 onClick={() => onOpen(entry)}
-                class="block w-full cursor-pointer px-2 py-2 text-left hover:bg-gray-800/60 focus-visible:outline-2 focus-visible:outline-emerald-300"
+                class="block min-w-0 flex-1 cursor-pointer rounded text-left hover:bg-gray-800/60 focus-visible:outline-2 focus-visible:outline-emerald-300"
               >
                 {content}
               </button>
             ) : (
-              <div class="px-2 py-2">{content}</div>
+              <div class="min-w-0 flex-1">{content}</div>
             )}
+            <RevealButton path={entry.path} />
           </li>
         );
       })}

@@ -29,11 +29,14 @@ func (t Text) Join(other Text) Text {
 	return Text{ES: t.ES + " " + other.ES, EN: t.EN + " " + other.EN}
 }
 
-// Advice es la recomendación para un elemento. Action puede estar vacío.
+// Advice es la recomendación para un elemento. Action puede estar vacío. Manual
+// indica que no se quita borrándolo, sino como dice Action, así que la limpieza no
+// lo ofrece.
 type Advice struct {
 	Level  Level `json:"level"`
 	Reason Text  `json:"reason"`
 	Action Text  `json:"action"`
+	Manual bool  `json:"manual"`
 }
 
 // Env son las carpetas del sistema contra las que se comparan las rutas.
@@ -88,6 +91,7 @@ func New(env Env) *Catalog {
 	})
 	c.add(drive, `hiberfil.sys`, false, Advice{
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Guarda tu sesión para hibernar y para el inicio rápido.", "Stores your session for hibernation and fast startup."},
 		Action: Text{"No la borres a mano. Se quita con powercfg /h off como administrador, y pierdes hibernación e inicio rápido.", "Don't delete it by hand. Remove it with powercfg /h off as administrator, and you lose hibernation and fast startup."},
 	})
@@ -101,11 +105,13 @@ func New(env Env) *Catalog {
 	})
 	c.add(drive, `$Recycle.Bin`, true, Advice{
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Tu papelera: son archivos que ya borraste.", "Your Recycle Bin: files you already deleted."},
 		Action: Text{"Revisa que no necesites nada y vacíala desde el escritorio.", "Check you don't need anything, then empty it from the desktop."},
 	})
 	c.add(drive, `Windows.old`, true, Advice{
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Tu versión anterior de Windows. Sirve para regresar a ella.", "Your previous Windows version. It lets you roll back."},
 		Action: Text{"Quítala con Configuración > Almacenamiento > Archivos temporales.", "Remove it from Settings > Storage > Temporary files."},
 	})
@@ -124,6 +130,7 @@ func New(env Env) *Catalog {
 	c.add(env.LocalAppData, `Temp`, true, temp)
 	c.add(env.Windir, `SoftwareDistribution\Download`, true, Advice{
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Descargas de Windows Update.", "Windows Update downloads."},
 		Action: Text{"Límpialas con Configuración > Almacenamiento > Archivos temporales.", "Clean them from Settings > Storage > Temporary files."},
 	})
@@ -143,6 +150,12 @@ func New(env Env) *Catalog {
 	c.add(env.Home, `AppData`, true, Advice{
 		Level:  LevelReview,
 		Reason: Text{"Datos y ajustes de tus apps. Borrarlos puede hacerte perder sesiones o configuración.", "App data and settings. Deleting them can lose sessions or configuration."},
+	})
+	c.add(env.LocalAppData, `Docker`, true, Advice{
+		Level:  LevelReview,
+		Manual: true,
+		Reason: Text{"Disco de Docker: imágenes, contenedores y volúmenes. Los volúmenes pueden tener datos que no se recuperan.", "Docker's disk: images, containers and volumes. Volumes may hold data you can't recover."},
+		Action: Text{"Limpia con docker system prune, que no toca volúmenes. El disco virtual puede no encogerse solo.", "Clean with docker system prune, which leaves volumes alone. The virtual disk may not shrink on its own."},
 	})
 	return c
 }
@@ -195,11 +208,13 @@ var extensions = map[string]Advice{
 	},
 	".vhdx": {
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Disco virtual. Borrarlo destruye lo que hay dentro de esa máquina.", "Virtual disk. Deleting it destroys what's inside that machine."},
 		Action: Text{"Elimínalo desde la app que lo creó.", "Remove it from the app that created it."},
 	},
 	".vmdk": {
 		Level:  LevelReview,
+		Manual: true,
 		Reason: Text{"Disco virtual. Borrarlo destruye lo que hay dentro de esa máquina.", "Virtual disk. Deleting it destroys what's inside that machine."},
 		Action: Text{"Elimínalo desde la app que lo creó.", "Remove it from the app that created it."},
 	},
@@ -215,6 +230,11 @@ func (c *Catalog) Explain(path string, isDir bool) (Advice, bool) {
 	norm := normalize(path)
 	for current := norm; ; {
 		if rule, ok := c.paths[current]; ok && (rule.inherit || current == norm) {
+			// Un disco virtual en AppData sigue siendo un disco virtual: su regla es
+			// más específica que la de la carpeta, salvo que esta prohíba tocarlo.
+			if ext, ok := extensions[strings.ToLower(filepath.Ext(path))]; ok && !isDir && ext.Manual && rule.advice.Level != LevelKeep {
+				return ext, true
+			}
 			return rule.advice, true
 		}
 		parent := filepath.Dir(current)

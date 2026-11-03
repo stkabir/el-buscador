@@ -152,6 +152,27 @@ func (r *Result) Lookup(path string) (Entry, bool) {
 	return n.entry(), true
 }
 
+// Find devuelve el archivo o la carpeta indicados, si el escaneo los registró. De
+// cada carpeta solo se conservan sus archivos más grandes y el top global.
+func (r *Result) Find(path string) (Entry, bool) {
+	if entry, ok := r.Lookup(path); ok {
+		return entry, true
+	}
+	if n := r.root.find(filepath.Dir(path)); n != nil {
+		for _, file := range n.files {
+			if candidate := n.join(file.name); strings.EqualFold(candidate, path) {
+				return Entry{Name: file.name, Path: candidate, Size: file.size, Cloud: file.cloud, Files: 1}, true
+			}
+		}
+	}
+	for _, file := range r.summary.TopFiles {
+		if strings.EqualFold(file.Path, path) {
+			return file, true
+		}
+	}
+	return Entry{}, false
+}
+
 // LastActivity devuelve la última modificación dentro de una carpeta, en segundos
 // Unix, sin contar las subcarpetas directas que exclude descarta. Devuelve 0 si no
 // la conoce.

@@ -4,6 +4,7 @@ package devtrash
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ const (
 	// Lo más pequeño solo estorba: no cambia cuánto espacio se recupera.
 	minFindingSize = 1024 * 1024
 	gitWorkers     = 8
+	maxPackageJSON = 1024 * 1024
 )
 
 // Finding es una carpeta detectada.
@@ -34,6 +36,8 @@ type Finding struct {
 	// en segundos Unix. Es 0 en los cachés.
 	LastActivity int64        `json:"lastActivity"`
 	Advice       rules.Advice `json:"advice"`
+	// Command es el comando oficial de limpieza, listo para ejecutar sin shell.
+	Command []string `json:"command"`
 }
 
 // Report es el resultado del análisis.
@@ -59,6 +63,9 @@ type projectRule struct {
 	locks        []lockfile
 	command      string
 	what         rules.Text
+	// needsBuildScript exige un script build en package.json para ser Seguro:
+	// "dist" y "build" también pueden ser entregables puestos a mano.
+	needsBuildScript bool
 }
 
 var nodeLocks = []lockfile{
@@ -99,11 +106,11 @@ var projectRules = []projectRule{
 		what: rules.Text{ES: "Compilación de Nuxt.", EN: "Nuxt build output."},
 	},
 	{
-		name: "dist", markers: []string{"package.json"}, command: "el comando de build del proyecto",
+		name: "dist", markers: []string{"package.json"}, needsBuildScript: true, command: "el comando de build del proyecto",
 		what: rules.Text{ES: "Salida de compilación.", EN: "Build output."},
 	},
 	{
-		name: "build", markers: []string{"package.json"}, command: "el comando de build del proyecto",
+		name: "build", markers: []string{"package.json"}, needsBuildScript: true, command: "el comando de build del proyecto",
 		what: rules.Text{ES: "Salida de compilación.", EN: "Build output."},
 	},
 	{
@@ -144,6 +151,20 @@ func isGeneratedName(name string) bool {
 	return slices.ContainsFunc(projectRules, func(rule projectRule) bool {
 		return strings.EqualFold(rule.name, name)
 	})
+}
+
+// Recheck vuelve a clasificar un hallazgo con el estado actual del disco y de git.
+// El segundo valor es false si ya no se reconoce como generado.
+func Recheck(ctx context.Context, finding Finding, catalog *rules.Catalog) (rules.Advice, bool) {
+	if finding.Category != CategoryProject {
+		return finding.Advice, true
+	}
+	entry := scanner.Entry{Path: finding.Path, Name: filepath.Base(finding.Path), IsDir: true}
+	rule, ok := matchRule(entry)
+	if !ok {
+		return rules.Advice{}, false
+	}
+	return adviseProject(ctx, entry, rule, catalog), true
 }
 
 // Analyze busca basura dev en un escaneo terminado.
@@ -254,6 +275,28 @@ func exists(path string) bool {
 	return err == nil
 }
 
+// hasBuildScript lee package.json salvo que esté solo en la nube, porque abrirlo lo
+// descargaría. Sin poder leerlo responde false, que lleva a Revisar.
+func hasBuildScript(project string) bool {
+	path := filepath.Join(project, "package.json")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxPackageJSON || isCloudOnly(path) {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		Scripts map[string]any `json:"scripts"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return false
+	}
+	script, ok := manifest.Scripts["build"].(string)
+	return ok && strings.TrimSpace(script) != ""
+}
+
 func adviseProject(ctx context.Context, entry scanner.Entry, rule projectRule, catalog *rules.Catalog) rules.Advice {
 	project := filepath.Dir(entry.Path)
 	lock, hasLock := findLock(project, rule.locks)
@@ -274,6 +317,11 @@ func adviseProject(ctx context.Context, entry scanner.Entry, rule projectRule, c
 		advice = rules.Advice{
 			Level:  rules.LevelReview,
 			Reason: rule.what.Join(rules.Text{ES: "No pudimos comprobar con git si es parte del proyecto.", EN: "We couldn't check with git whether it's part of the project."}),
+		}
+	case state == gitIgnored && rule.needsBuildScript && !hasBuildScript(project):
+		advice = rules.Advice{
+			Level:  rules.LevelReview,
+			Reason: rule.what.Join(rules.Text{ES: "Git la ignora, pero package.json no tiene un script build: pudo crearse a mano.", EN: "Git ignores it, but package.json has no build script: it may have been created by hand."}),
 		}
 	case state == gitIgnored:
 		advice = rules.Advice{
@@ -365,19 +413,14 @@ func findCaches(result *scanner.Result, catalog *rules.Catalog) []Finding {
 		if cache.command != "" {
 			advice.Action = rules.Text{ES: "Límpialo con: " + cache.command, EN: "Clean it with: " + cache.command}
 		}
-		findings = append(findings, Finding{Path: entry.Path, Kind: cache.kind, Category: CategoryCache, Size: entry.Size, Advice: advice})
+		findings = append(findings, Finding{Path: entry.Path, Kind: cache.kind, Category: CategoryCache, Size: entry.Size, Advice: advice, Command: strings.Fields(cache.command)})
 	}
 
 	if env.LocalAppData != "" {
 		if entry, ok := result.Lookup(filepath.Join(env.LocalAppData, "Docker")); ok && entry.Size >= minFindingSize {
-			findings = append(findings, Finding{
-				Path: entry.Path, Kind: "Docker", Category: CategoryCache, Size: entry.Size,
-				Advice: rules.Advice{
-					Level:  rules.LevelReview,
-					Reason: rules.Text{ES: "Disco de Docker: imágenes, contenedores y volúmenes. Los volúmenes pueden tener datos que no se recuperan.", EN: "Docker's disk: images, containers and volumes. Volumes may hold data you can't recover."},
-					Action: rules.Text{ES: "Limpia con docker system prune, que no toca volúmenes. El disco virtual puede no encogerse solo.", EN: "Clean with docker system prune, which leaves volumes alone. The virtual disk may not shrink on its own."},
-				},
-			})
+			if advice, ok := catalog.Explain(entry.Path, true); ok {
+				findings = append(findings, Finding{Path: entry.Path, Kind: "Docker", Category: CategoryCache, Size: entry.Size, Advice: advice})
+			}
 		}
 	}
 	return findings

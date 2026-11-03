@@ -312,3 +312,86 @@ func TestRealAnalyze(t *testing.T) {
 		}
 	}
 }
+
+func levelOf(t *testing.T, report Report, kind string) rules.Level {
+	t.Helper()
+	for _, finding := range report.Findings {
+		if finding.Kind == kind {
+			return finding.Advice.Level
+		}
+	}
+	t.Fatalf("sin hallazgo %s: %+v", kind, report.Findings)
+	return ""
+}
+
+func ignoredProject(t *testing.T, manifest string) string {
+	t.Helper()
+	root := t.TempDir()
+	write(t, filepath.Join(root, "dist", "app.js"), trashSize)
+	write(t, filepath.Join(root, ".next", "cache.bin"), trashSize)
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("dist\n.next\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "init", "-q")
+	return root
+}
+
+func TestDistNeedsBuildScriptToBeSafe(t *testing.T) {
+	cases := []struct {
+		name, manifest string
+		want           rules.Level
+	}{
+		{"con script", `{"scripts":{"build":"vite build"}}`, rules.LevelSafe},
+		{"sin script", `{"scripts":{"test":"vitest"}}`, rules.LevelReview},
+		{"script vacío", `{"scripts":{"build":" "}}`, rules.LevelReview},
+		{"json roto", `{`, rules.LevelReview},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			report := analyze(t, ignoredProject(t, c.manifest), rules.Env{})
+			if got := levelOf(t, report, "dist"); got != c.want {
+				t.Fatalf("dist = %s, se esperaba %s", got, c.want)
+			}
+			// .next es de un framework concreto: basta con que git lo ignore.
+			if got := levelOf(t, report, ".next"); got != rules.LevelSafe {
+				t.Fatalf(".next = %s", got)
+			}
+		})
+	}
+}
+
+func TestRecheckSeesChangesAfterScan(t *testing.T) {
+	root := ignoredProject(t, `{"scripts":{"build":"vite build"}}`)
+	report := analyze(t, root, rules.Env{})
+	catalog := rules.New(rules.Env{})
+	var dist Finding
+	for _, finding := range report.Findings {
+		if finding.Kind == "dist" {
+			dist = finding
+		}
+	}
+	if dist.Advice.Level != rules.LevelSafe {
+		t.Fatalf("antes: %+v", dist.Advice)
+	}
+
+	// Alguien decide versionar la carpeta después del escaneo.
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "add", "dist")
+	advice, ok := Recheck(context.Background(), dist, catalog)
+	if !ok || advice.Level != rules.LevelKeep {
+		t.Fatalf("rastreada: %+v, %v", advice, ok)
+	}
+
+	// Sin el marcador ya no se reconoce como generada: queda sin clasificar.
+	if err := os.Remove(filepath.Join(root, "package.json")); err != nil {
+		t.Fatal(err)
+	}
+	if advice, ok := Recheck(context.Background(), dist, catalog); ok {
+		t.Fatalf("sin marcador: %+v", advice)
+	}
+}

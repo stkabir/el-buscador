@@ -367,3 +367,29 @@ func TestRealScan(t *testing.T) {
 		}
 	}
 }
+
+func TestFindLocatesFilesAndFolders(t *testing.T) {
+	root := t.TempDir()
+	folder := filepath.Join(root, "carpeta")
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(folder, "dato.bin")
+	if err := os.WriteFile(file, make([]byte, 8192), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Scan(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry, ok := result.Find(folder); !ok || !entry.IsDir {
+		t.Fatalf("carpeta: %+v, %v", entry, ok)
+	}
+	if entry, ok := result.Find(file); !ok || entry.IsDir || entry.Size == 0 {
+		t.Fatalf("archivo: %+v, %v", entry, ok)
+	}
+	if _, ok := result.Find(filepath.Join(folder, "no-existe")); ok {
+		t.Fatal("encontró un archivo inexistente")
+	}
+}

@@ -97,3 +97,23 @@ func TestEmptyEnvDoesNotCreateRules(t *testing.T) {
 		t.Error("sin Home no se puede saber si está sincronizada")
 	}
 }
+
+func TestVirtualDiskInAppDataIsManual(t *testing.T) {
+	catalog := New(Env{SystemDrive: "C:", Windir: `C:\Windows`, Home: `C:\Users\ana`, LocalAppData: `C:\Users\ana\AppData\Local`})
+
+	advice, ok := catalog.Explain(`C:\Users\ana\AppData\Local\wsl\rootfs.vhdx`, false)
+	if !ok || !advice.Manual || advice.Level != LevelReview {
+		t.Fatalf("vhdx: %+v, %v", advice, ok)
+	}
+	if advice, _ := catalog.Explain(`C:\Users\ana\AppData\Local\app\config.json`, false); advice.Manual {
+		t.Fatalf("archivo normal: %+v", advice)
+	}
+	// La regla de sistema manda: nunca baja de No tocar.
+	if advice, _ := catalog.Explain(`C:\Windows\x.vhdx`, false); advice.Level != LevelKeep {
+		t.Fatalf("en Windows: %+v", advice)
+	}
+	// La extensión no vuelve seguro algo por sí sola.
+	if advice, _ := catalog.Explain(`C:\Users\ana\AppData\Local\Docker\data.bin`, false); !advice.Manual {
+		t.Fatalf("dentro de Docker: %+v", advice)
+	}
+}

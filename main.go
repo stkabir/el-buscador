@@ -10,16 +10,21 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// extraBrowserArgs solo se llena en builds de prueba (ver e2e.go).
-var extraBrowserArgs []string
+// Estas variables solo se llenan en builds de prueba (ver e2e.go).
+var (
+	extraBrowserArgs []string
+	scanRootOverride string
+)
 
 func main() {
+	scan := &ScanService{}
 	app := application.New(application.Options{
 		Name:        "El Buscador",
 		Description: "Analizador de disco que explica qué puedes borrar",
 		Services: []application.Service{
 			application.NewService(&DiskService{}),
-			application.NewService(&ScanService{}),
+			application.NewService(scan),
+			application.NewService(&CleanupService{scan: scan}),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
