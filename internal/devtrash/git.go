@@ -50,6 +50,21 @@ func readGitState(ctx context.Context, project, name string) gitState {
 	return gitUnknown
 }
 
+// GitTracksFile indica si git rastrea un archivo. Si git falla responde true: lo
+// rastreado nunca es seguro, y no se pudo descartar.
+func GitTracksFile(ctx context.Context, path string) bool {
+	root := findRepoRoot(filepath.Dir(path))
+	if root == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return true
+	}
+	tracked, err := runGit(ctx, root, "ls-files", "-z", "--", ":(literal)"+filepath.ToSlash(rel)).Output()
+	return err != nil || len(tracked) > 0
+}
+
 func findRepoRoot(dir string) string {
 	for {
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {

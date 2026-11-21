@@ -1,11 +1,14 @@
 import { createContext, render } from "preact";
 import { useContext, useEffect, useMemo, useState } from "preact/hooks";
 import { CleanupService, DiskService, ScanService } from "../bindings/el-buscador";
-import { CleanupDialog, focusRing } from "./cleanup";
+import { CleanupDialog, FreeUpDialog, RevealButton as RevealIcon, focusRing } from "./cleanup";
+import { Duplicates } from "./duplicates";
+import { DiskMap } from "./map";
+import { UpdateBar, VersionNote } from "./update";
 import { dictionary, I18n, initialLang, makeFormat, saveLang, useI18n, type Lang } from "./i18n";
 import "./style.css";
 
-type Usage = Awaited<ReturnType<typeof DiskService.Usage>>;
+type Usage = NonNullable<Awaited<ReturnType<typeof DiskService.Drives>>>[number];
 type Status = Awaited<ReturnType<typeof ScanService.Status>>;
 type Summary = Awaited<ReturnType<typeof ScanService.Summary>>;
 type Folder = Awaited<ReturnType<typeof ScanService.Listing>>;
@@ -13,7 +16,7 @@ type Entry = NonNullable<Summary["topFiles"]>[number];
 type Finding = NonNullable<Summary["dev"]["findings"]>[number];
 type Advice = Finding["advice"];
 type AdviceMap = Summary["advice"];
-type Tab = "files" | "dirs" | "dev" | "explore";
+type Tab = "files" | "dirs" | "map" | "dev" | "dups" | "explore";
 
 const POLL_MS = 250;
 const GB = 1024 ** 3;
@@ -24,6 +27,7 @@ const Selection = createContext({
   selected: new Map<string, number>(),
   removed: new Set<string>(),
   toggle: (_path: string, _size: number) => {},
+  freeUp: (_path: string) => {},
 });
 
 function failedStatus(err: unknown): Status {
@@ -32,7 +36,8 @@ function failedStatus(err: unknown): Status {
 
 function App() {
   const [lang, setLang] = useState<Lang>(initialLang);
-  const [usage, setUsage] = useState<Usage | null>(null);
+  const [drives, setDrives] = useState<Usage[] | null>(null);
+  const [drive, setDrive] = useState("");
   const [usageFailed, setUsageFailed] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -56,11 +61,19 @@ function App() {
   }, [lang]);
 
   useEffect(() => {
-    DiskService.Usage().then(setUsage).catch((err) => {
-      console.error(err);
-      setUsageFailed(true);
-    });
+    DiskService.Drives()
+      .then((next) => {
+        setDrives(next ?? []);
+        if (!next || next.length === 0) setUsageFailed(true);
+      })
+      .catch((err) => {
+        console.error(err);
+        setUsageFailed(true);
+      });
   }, [summary]);
+
+  // El del sistema, hasta que se elija otro.
+  const usage = drives?.find((item) => item.drive === drive) ?? drives?.[0] ?? null;
 
   const running = status?.state === "scanning" || status?.state === "analyzing";
   useEffect(() => {
@@ -81,7 +94,7 @@ function App() {
   async function start() {
     setSummary(null);
     try {
-      await ScanService.Start();
+      await ScanService.Start(usage?.drive ?? "");
       const next = await ScanService.Status();
       // Un escaneo muy corto ya pudo terminar: no quedaría nada que sondear.
       if (next.state === "done") setSummary(await ScanService.Summary());
@@ -94,13 +107,18 @@ function App() {
 
   return (
     <I18n.Provider value={i18n}>
+      <div class="flex h-full flex-col">
+      <UpdateBar />
+      <div class="min-h-0 flex-1">
       {summary ? (
         <Results summary={summary} usage={usage} onRescan={start} />
       ) : running && status ? (
         <Scanning status={status} />
       ) : (
-        <Home usage={usage} usageFailed={usageFailed} status={status} onStart={start} />
+        <Home usage={usage} drives={drives ?? []} onDrive={setDrive} usageFailed={usageFailed} status={status} onStart={start} />
       )}
+      </div>
+      </div>
     </I18n.Provider>
   );
 }
@@ -120,8 +138,8 @@ function LangToggle() {
   );
 }
 
-function Home(props: { usage: Usage | null; usageFailed: boolean; status: Status | null; onStart: () => void }) {
-  const { usage, usageFailed, status, onStart } = props;
+function Home(props: { usage: Usage | null; drives: Usage[]; onDrive: (drive: string) => void; usageFailed: boolean; status: Status | null; onStart: () => void }) {
+  const { usage, drives, onDrive, usageFailed, status, onStart } = props;
   const { t, format } = useI18n();
   const usedPercent = usage ? ((usage.total - usage.free) / usage.total) * 100 : 0;
 
@@ -156,10 +174,28 @@ function Home(props: { usage: Usage | null; usageFailed: boolean; status: Status
         {t.scanButton}
       </button>
 
+      {drives.length > 1 && (
+        <div class="flex flex-wrap items-center justify-center gap-2 text-sm text-gray-400" role="group" aria-label={t.otherDrives}>
+          <span>{t.otherDrives}</span>
+          {drives.map((item) => (
+            <button
+              key={item.drive}
+              type="button"
+              aria-pressed={item.drive === usage?.drive}
+              onClick={() => onDrive(item.drive)}
+              class={`cursor-pointer rounded-lg border px-3 py-1 ${focusRing} ${item.drive === usage?.drive ? "border-emerald-400 text-white" : "border-gray-700 text-gray-300 hover:bg-gray-800"}`}
+            >
+              {item.drive}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div class="text-sm text-gray-400" role="status">
         {status?.state === "canceled" && <p class="mb-2">{t.canceledNote}</p>}
         {status?.state === "failed" && <p class="mb-2 text-red-300">{t.failedNote}</p>}
         <p>{t.promise}</p>
+        <VersionNote />
       </div>
     </main>
   );
@@ -196,11 +232,14 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
   const [selected, setSelected] = useState(new Map<string, number>());
   const [removed, setRemoved] = useState(new Set<string>());
   const [cleaning, setCleaning] = useState<string[] | null>(null);
+  const [dupDialog, setDupDialog] = useState(false);
+  const [freeing, setFreeing] = useState<string | null>(null);
 
   const selection = useMemo(
     () => ({
       selected,
       removed,
+      freeUp: setFreeing,
       toggle(path: string, size: number) {
         setSelected((current) => {
           const next = new Map(current);
@@ -228,13 +267,15 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
   const tabs: { id: Tab; label: string }[] = [
     { id: "files", label: t.tabFiles },
     { id: "dirs", label: t.tabFolders },
+    { id: "map", label: t.tabMap },
     ...(findings.length > 0 ? [{ id: "dev" as const, label: t.tabDev }] : []),
+    { id: "dups", label: t.tabDuplicates },
     { id: "explore", label: t.tabExplore },
   ];
 
   return (
     <Selection.Provider value={selection}>
-    <main class="mx-auto flex h-full max-w-5xl flex-col gap-4 px-6 py-5" inert={cleaning !== null}>
+    <main class="mx-auto flex h-full max-w-5xl flex-col gap-4 px-6 py-5" inert={cleaning !== null || dupDialog || freeing !== null}>
       <header class="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 class="text-2xl font-semibold">{t.found(format.size(summary.size), format.number(summary.files))}</h1>
@@ -284,6 +325,11 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
         {tab === "dirs" && <EntryList entries={summary.topDirs ?? []} advice={summary.advice} showPath />}
         {tab === "dev" && <DevTrash findings={findings} safeSize={summary.dev.safeSize} />}
         {tab === "explore" && <Explorer root={summary.root} />}
+        {tab === "map" && <DiskMap root={summary.root} removed={removed} onList={() => setTab("explore")} />}
+        {/* Sigue montada al cambiar de pestaña: una búsqueda larga y sus elecciones no se pierden. */}
+        <div hidden={tab !== "dups"} class="h-full">
+          <Duplicates onDialog={setDupDialog} onCleaned={onCleaned} onRescan={onRescan} />
+        </div>
       </div>
 
       {selected.size > 0 && (
@@ -311,6 +357,7 @@ function Results(props: { summary: Summary; usage: Usage | null; onRescan: () =>
     {cleaning && (
       <CleanupDialog paths={cleaning} onClose={() => setCleaning(null)} onCleaned={onCleaned} onRescan={onRescan} />
     )}
+    {freeing && <FreeUpDialog path={freeing} onClose={() => setFreeing(null)} onRescan={onRescan} />}
     </Selection.Provider>
   );
 }
@@ -336,20 +383,7 @@ function SelectBox({ path, name, size, advice }: { path: string; name: string; s
 }
 
 function RevealButton({ path }: { path: string }) {
-  const { t } = useI18n();
-  return (
-    <button
-      type="button"
-      aria-label={`${t.reveal}: ${path}`}
-      title={t.reveal}
-      onClick={() => CleanupService.Reveal(path).catch(console.error)}
-      class={`mt-0.5 shrink-0 cursor-pointer rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-gray-200 ${focusRing}`}
-    >
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-      </svg>
-    </button>
-  );
+  return <RevealIcon path={path} onReveal={(target) => CleanupService.Reveal(target)} />;
 }
 
 function DevTrash({ findings, safeSize }: { findings: Finding[]; safeSize: number }) {
@@ -467,7 +501,7 @@ function EntryList(props: {
 }) {
   const { entries, advice, showPath, scale, onOpen } = props;
   const { t, format } = useI18n();
-  const { removed } = useContext(Selection);
+  const { removed, freeUp } = useContext(Selection);
   const largest = scale || Math.max(1, ...entries.map((entry) => entry.size));
 
   function entrySize(entry: Entry) {
@@ -511,6 +545,16 @@ function EntryList(props: {
               </button>
             ) : (
               <div class="min-w-0 flex-1">{content}</div>
+            )}
+            {entryAdvice?.synced && entry.size > 0 && (
+              <button
+                type="button"
+                data-free-up={entry.path}
+                onClick={() => freeUp(entry.path)}
+                class={`shrink-0 cursor-pointer rounded border border-gray-700 px-2 py-0.5 text-xs text-gray-300 hover:bg-gray-800 ${focusRing}`}
+              >
+                {t.freeUpAction}
+              </button>
             )}
             <RevealButton path={entry.path} />
           </li>

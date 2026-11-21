@@ -58,6 +58,8 @@ type rawEntry struct {
 	allocated int64
 	id        int64
 	lastWrite int64
+	// modified es el FILETIME crudo: detecta cambios de menos de un segundo.
+	modified int64
 }
 
 var dirBuffers = sync.Pool{New: func() any {
@@ -84,6 +86,15 @@ func classify(attrs, tag uint32) entryKind {
 
 func isCloudTag(tag uint32) bool {
 	return tag&reparseTagCloudMask == reparseTagCloud || tag == reparseTagOneDrive
+}
+
+// comparable indica si un archivo se puede leer para compararlo. Rechaza los archivos
+// de sistema y todo reparse que no sea de nube.
+func comparable(attrs, tag uint32) bool {
+	if attrs&windows.FILE_ATTRIBUTE_SYSTEM != 0 {
+		return false
+	}
+	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 || isCloudTag(tag)
 }
 
 // measure devuelve lo que ocupa en disco y lo que falta por estar solo en nube.
@@ -146,6 +157,7 @@ func readDir(path string, visit func(rawEntry)) error {
 					allocated: info.allocationSize,
 					id:        info.fileID,
 					lastWrite: fileTimeToUnix(info.lastWriteTime),
+					modified:  info.lastWriteTime,
 				}
 				if info.fileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
 					entry.tag = info.eaSize

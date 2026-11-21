@@ -1,0 +1,64 @@
+# Publica una versión al subir una etiqueta como v1.2.3. Compila, prueba, firma y crea
+# el release. Las copias instaladas lo detectan al abrirse.
+name: Publicar
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      EL_BUSCADOR_VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Instalar herramientas
+        run: |
+          corepack enable
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+          choco install nsis --no-progress -y
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+
+      - name: Poner la versión en el instalador y en el ejecutable
+        run: |
+          number="${EL_BUSCADOR_VERSION#v}"
+          sed -i "s/0\.0\.1/$number/g" build/windows/info.json build/windows/nsis/wails_tools.nsh
+
+      - name: Compilar
+        run: wails3 build
+
+      - name: Probar
+        run: go test . ./internal/... ./scripts/... -count=1 -timeout 300s
+
+      - name: Crear instalador
+        run: wails3 task windows:package INSTALL_SCOPE=user
+
+      - name: Firmar para el actualizador
+        env:
+          EL_BUSCADOR_SIGNING_KEY: ${{ secrets.EL_BUSCADOR_SIGNING_KEY }}
+        run: go run ./scripts/release sign bin el-buscador.exe
+
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$EL_BUSCADOR_VERSION" --generate-notes --title "$EL_BUSCADOR_VERSION" \
+            bin/el-buscador.exe bin/el-buscador.exe.sig bin/checksums.txt bin/el-buscador-*-installer.exe

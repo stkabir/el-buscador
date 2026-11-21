@@ -153,6 +153,12 @@ func isGeneratedName(name string) bool {
 	})
 }
 
+// SkipForDuplicates dice qué carpetas no se comparan: programas, y lo generado que ya
+// se limpia aquí. Sus copias son normales y borrarlas rompe cosas.
+func SkipForDuplicates(name string) bool {
+	return isSkippedDir(name) || isGeneratedName(name)
+}
+
 // Recheck vuelve a clasificar un hallazgo con el estado actual del disco y de git.
 // El segundo valor es false si ya no se reconoce como generado.
 func Recheck(ctx context.Context, finding Finding, catalog *rules.Catalog) (rules.Advice, bool) {

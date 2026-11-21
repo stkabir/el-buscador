@@ -393,3 +393,93 @@ func TestFindLocatesFilesAndFolders(t *testing.T) {
 		t.Fatal("encontró un archivo inexistente")
 	}
 }
+
+func TestTreeLevelsOrderAndOther(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel string, size int) {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("grande/sub/profundo.bin", 2*1024*1024)
+	write("grande/otra/igual.bin", 2*1024*1024)
+	write("chica/a.bin", 1024*1024)
+	for i := range maxTreeChildren + 5 {
+		write(filepath.Join("muchas", "d"+string(rune('a'+i%26))+string(rune('a'+i/26)), "x.bin"), 8192)
+	}
+	result, err := Scan(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tree, parent, err := result.Tree(root, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent != "" {
+		t.Fatalf("la raíz no tiene padre: %q", parent)
+	}
+	if len(tree.Children) != 3 || tree.Children[0].Name != "grande" {
+		t.Fatalf("%+v", tree.Children)
+	}
+	// El segundo nivel existe; el tercero ya no se manda.
+	sub := tree.Children[0].Children[0]
+	if !sub.IsDir || len(sub.Children) != 0 || sub.Size == 0 {
+		t.Fatalf("%+v", sub)
+	}
+	// Lo que no se lista no se pierde: la suma sigue siendo el total.
+	var many TreeNode
+	for _, child := range tree.Children {
+		if child.Name == "muchas" {
+			many = child
+		}
+	}
+	if len(many.Children) != maxTreeChildren || many.Other == 0 {
+		t.Fatalf("hijos %d, otros %d", len(many.Children), many.Other)
+	}
+	var sum int64 = many.Other
+	for _, child := range many.Children {
+		sum += child.Size
+	}
+	if sum != many.Size {
+		t.Fatalf("suma %d, total %d", sum, many.Size)
+	}
+
+	if _, _, err := result.Tree(filepath.Join(root, "no-existe"), 2); err == nil {
+		t.Fatal("debía fallar")
+	}
+	_, parent, err = result.Tree(filepath.Join(root, "grande"), 1)
+	if err != nil || parent != root {
+		t.Fatalf("padre %q, %v", parent, err)
+	}
+}
+
+// Una cadena de carpetas de paso no gasta los niveles del mapa.
+func TestTreePassThroughKeepsDepth(t *testing.T) {
+	root := t.TempDir()
+	for _, rel := range []string{"Users/ana/fotos/a.bin", "Users/ana/series/b.bin"} {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, make([]byte, 1024*1024), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Scan(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, _, err := result.Tree(root, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ana := tree.Children[0].Children[0]
+	if ana.Name != "ana" || len(ana.Children) != 2 {
+		t.Fatalf("debía llegar a lo que hay en ana: %+v", ana)
+	}
+}

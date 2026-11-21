@@ -117,3 +117,26 @@ func TestVirtualDiskInAppDataIsManual(t *testing.T) {
 		t.Fatalf("dentro de Docker: %+v", advice)
 	}
 }
+
+func TestIsSyncedOutsideProfile(t *testing.T) {
+	catalog := New(Env{SystemDrive: "C:", Home: `C:\Users\ana`, SyncRoots: []string{`E:\Cosas\Nube`, ""}})
+	synced := []string{
+		`C:\Users\ana\OneDrive\a.txt`,
+		`C:\Users\ana\iCloudDrive`,
+		`D:\OneDrive - Empresa\a.txt`,
+		`D:\Dropbox\a`,
+		`E:\Cosas\Nube\a.txt`,
+		`E:\Cosas\Nube`,
+	}
+	for _, path := range synced {
+		if !catalog.IsSynced(path) {
+			t.Errorf("%s debía contar como sincronizada", path)
+		}
+	}
+	local := []string{`C:\Users\ana\Documents\OneDrive\a`, `D:\proyectos\Dropbox\a`, `E:\Cosas\Nube2\a`, `D:\`}
+	for _, path := range local {
+		if catalog.IsSynced(path) {
+			t.Errorf("%s no debía contar como sincronizada", path)
+		}
+	}
+}

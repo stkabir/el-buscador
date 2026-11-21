@@ -2,9 +2,13 @@
 
 Analizador de disco para Windows que muestra qué ocupa espacio y explica qué puedes borrar con seguridad.
 
-En desarrollo. Hoy escanea el disco del sistema, muestra lo que más pesa, explica qué se puede borrar y detecta basura de desarrollo, en español e inglés. Limpia lo que confirmas: manda a la papelera o, en cachés, ejecuta el comando oficial de la herramienta, que te muestra antes.
+En desarrollo. Hoy escanea cualquier disco fijo, muestra lo que más pesa, también en un mapa, explica qué se puede borrar, detecta basura de desarrollo y encuentra archivos duplicados, en español e inglés. Limpia lo que confirmas: manda a la papelera o, en cachés, ejecuta el comando oficial de la herramienta, que te muestra antes. En carpetas sincronizadas puede liberar espacio sin borrar nada de la nube.
 
 Límite conocido: los archivos compartidos por hard links, como los de pnpm, se cuentan una sola vez, en la primera carpeta donde aparecen. Por eso el tamaño de cada `node_modules` puede variar entre escaneos, aunque el total no se duplica.
+
+## Actualizaciones
+
+Al abrir, la app pregunta a GitHub si hay una versión nueva y avisa. Es la única conexión que hace. Nada se instala sin tu clic, y cada actualización se verifica con una firma antes de instalarse.
 
 ## Desarrollo
 

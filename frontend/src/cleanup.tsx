@@ -9,8 +9,8 @@ type CleanStatus = Awaited<ReturnType<typeof CleanupService.Status>>;
 const POLL_MS = 250;
 
 export const focusRing = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300";
-const secondaryButton = `cursor-pointer rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-200 hover:bg-gray-800 ${focusRing}`;
-const primaryButton = `cursor-pointer rounded-lg bg-emerald-400 px-5 py-2 text-sm font-semibold text-gray-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`;
+export const secondaryButton = `cursor-pointer rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-200 hover:bg-gray-800 ${focusRing}`;
+export const primaryButton = `cursor-pointer rounded-lg bg-emerald-400 px-5 py-2 text-sm font-semibold text-gray-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 ${focusRing}`;
 
 /** Guía la limpieza: comprueba, pide confirmación, muestra el avance y el resultado. */
 export function CleanupDialog(props: {
@@ -87,7 +87,7 @@ export function CleanupDialog(props: {
   } else if (status && done) {
     body = <Finished status={status} onClose={onClose} onRescan={onRescan} />;
   } else if (status) {
-    body = <Running status={status} />;
+    body = <Running status={status} onStop={() => CleanupService.Cancel().catch(console.error)} />;
   } else if (plan) {
     body = <Confirm plan={plan} onCancel={onClose} onConfirm={start} />;
   } else {
@@ -132,6 +132,7 @@ function Confirm(props: { plan: Plan; onCancel: () => void; onConfirm: (items: P
   const refused = items.filter((item) => item.code);
   const hasReview = allowed.some((item) => item.advice.level === "review");
   const hasSynced = allowed.some((item) => item.synced);
+  const overBin = plan.bin.known && plan.trashTotal > plan.bin.room;
 
   return (
     <>
@@ -144,6 +145,8 @@ function Confirm(props: { plan: Plan; onCancel: () => void; onConfirm: (items: P
           {t.syncedWarning}
         </p>
       )}
+
+      {overBin && <BinOver total={plan.trashTotal} room={plan.bin.room} />}
 
       <div class="mt-3 min-h-0 flex-1 overflow-y-auto">
         <ul class="divide-y divide-gray-800">
@@ -197,7 +200,7 @@ function Confirm(props: { plan: Plan; onCancel: () => void; onConfirm: (items: P
       <div class="mt-4 flex justify-end gap-2">
         <AutoFocusButton class={secondaryButton} onClick={onCancel} label={allowed.length > 0 ? t.cancel : t.close} />
         {allowed.length > 0 && (
-          <button type="button" class={primaryButton} disabled={hasReview && !reviewed} onClick={() => onConfirm(allowed)}>
+          <button type="button" class={primaryButton} disabled={overBin || (hasReview && !reviewed)} onClick={() => onConfirm(allowed)}>
             {t.confirmAction}
           </button>
         )}
@@ -206,7 +209,7 @@ function Confirm(props: { plan: Plan; onCancel: () => void; onConfirm: (items: P
   );
 }
 
-function Running({ status }: { status: CleanStatus }) {
+export function Running({ status, onStop }: { status: CleanStatus; onStop: () => void }) {
   const { t, format } = useI18n();
   const finished = status.outcomes?.length ?? 0;
   const current = Math.min(finished + 1, status.total);
@@ -221,13 +224,13 @@ function Running({ status }: { status: CleanStatus }) {
       {status.output && <Output text={status.output} />}
       <p class="mt-3 text-xs text-gray-400">{t.stopNote}</p>
       <div class="mt-4 flex justify-end">
-        <AutoFocusButton class={secondaryButton} onClick={() => CleanupService.Cancel().catch(console.error)} label={t.stop} />
+        <AutoFocusButton class={secondaryButton} onClick={onStop} label={t.stop} />
       </div>
     </>
   );
 }
 
-function Finished(props: { status: CleanStatus; onClose: () => void; onRescan: () => void }) {
+export function Finished(props: { status: CleanStatus; onClose: () => void; onRescan: () => void }) {
   const { status, onClose, onRescan } = props;
   const { t, format } = useI18n();
   const outcomes = status.outcomes ?? [];
@@ -290,5 +293,155 @@ function Output({ text }: { text: string }) {
     <pre class="mt-2 max-h-40 overflow-auto rounded-lg bg-gray-950 p-3 text-xs whitespace-pre-wrap text-gray-300" dir="ltr">
       {text}
     </pre>
+  );
+}
+
+export function RevealButton({ path, onReveal }: { path: string; onReveal: (path: string) => Promise<void> }) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      aria-label={`${t.reveal}: ${path}`}
+      title={t.reveal}
+      onClick={() => onReveal(path).catch(console.error)}
+      class={`mt-0.5 shrink-0 cursor-pointer rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-gray-200 ${focusRing}`}
+    >
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      </svg>
+    </button>
+  );
+}
+
+/** Avisa que el lote haría que Windows descarte lo que ya hay en la papelera. */
+export function BinOver({ total, room, onTrim }: { total: number; room: number; onTrim?: () => void }) {
+  const { t, format } = useI18n();
+  return (
+    <div class="mt-3 rounded-lg bg-red-950/70 px-3 py-2 text-sm text-red-200" role="alert">
+      <p>{t.binOver(format.size(total), format.size(room))}</p>
+      <div class="mt-2 flex flex-wrap gap-2">
+        {onTrim && (
+          <button type="button" class={secondaryButton} onClick={onTrim}>
+            {t.binTrim}
+          </button>
+        )}
+        <button type="button" class={secondaryButton} onClick={() => CleanupService.OpenRecycleBin().catch(console.error)}>
+          {t.openBin}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+type FreeUpResult = Awaited<ReturnType<typeof CleanupService.FreeUp>>;
+
+/** Saca archivos del disco dejándolos en la nube. La vista previa no cambia nada. */
+export function FreeUpDialog({ path, onClose, onRescan }: { path: string; onClose: () => void; onRescan: () => void }) {
+  const { t, format } = useI18n();
+  const [preview, setPreview] = useState<FreeUpResult | null>(null);
+  const [result, setResult] = useState<FreeUpResult | null>(null);
+  const [working, setWorking] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    CleanupService.FreeUpPreview(path)
+      .then(setPreview)
+      .catch((err) => {
+        console.error(err);
+        setFailed(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape" && !working) onClose();
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [working]);
+
+  async function confirm() {
+    setWorking(true);
+    try {
+      setResult(await CleanupService.FreeUp(path));
+    } catch (err) {
+      console.error(err);
+      setFailed(true);
+    }
+    setWorking(false);
+  }
+
+  let body;
+  if (failed) {
+    body = <Closing title={t.planFailed} onClose={onClose} />;
+  } else if (result) {
+    const stopped = !!result.code;
+    body = (
+      <>
+        <h2 id="clean-title" class="text-xl font-semibold">
+          {stopped ? t.freeUpNothing : t.freeUpDone(format.number(result.files), format.size(result.requested))}
+        </h2>
+        <p class="mt-2 text-sm text-gray-300">{stopped ? (t.refusal[result.code] ?? t.refusal.failed) : t.freeUpDoneNote}</p>
+        {result.failed > 0 && <p class="mt-2 text-sm text-amber-200">{t.freeUpFailed(format.number(result.failed))}</p>}
+        <div class="mt-4 flex justify-end gap-2">
+          <button type="button" class={secondaryButton} onClick={onRescan}>
+            {t.rescan}
+          </button>
+          <AutoFocusButton class={primaryButton} onClick={onClose} label={t.close} />
+        </div>
+      </>
+    );
+  } else if (preview && preview.code) {
+    body = <Closing title={t.freeUpNothing} note={t.refusal[preview.code] ?? t.refusal.failed} onClose={onClose} />;
+  } else if (preview && preview.files === 0) {
+    const note = preview.pending > 0 ? t.freeUpPending(format.number(preview.pending)) : preview.already > 0 ? t.freeUpAllCloud : t.freeUpNotCloud;
+    body = <Closing title={t.freeUpNothing} note={note} onClose={onClose} />;
+  } else if (preview) {
+    body = (
+      <>
+        <h2 id="clean-title" class="text-xl font-semibold">
+          {t.freeUpTitle(format.size(preview.requested))}
+        </h2>
+        <p class="mt-1 text-sm break-all text-gray-400">{path}</p>
+        <p class="mt-3 text-sm text-gray-200">{t.freeUpIntro(format.number(preview.files))}</p>
+        {preview.pending > 0 && <p class="mt-3 rounded-lg bg-amber-950/60 px-3 py-2 text-sm text-amber-200">{t.freeUpPending(format.number(preview.pending))}</p>}
+        {preview.local > 0 && <p class="mt-2 text-sm text-gray-400">{t.freeUpLocal(format.number(preview.local))}</p>}
+        <div class="mt-4 flex justify-end gap-2">
+          <AutoFocusButton class={secondaryButton} onClick={onClose} label={t.cancel} />
+          <button type="button" class={primaryButton} disabled={working} onClick={confirm}>
+            {t.freeUpAction}
+          </button>
+        </div>
+      </>
+    );
+  } else {
+    body = (
+      <h2 id="clean-title" class="text-xl font-semibold text-gray-300">
+        {t.planLoading}
+      </h2>
+    );
+  }
+
+  return (
+    <div class="fixed inset-0 z-10 flex items-center justify-center bg-black/70 p-4">
+      <div role="dialog" aria-modal="true" aria-labelledby="clean-title" class="flex max-h-full w-full max-w-xl flex-col rounded-xl border border-gray-700 bg-gray-900 p-5">
+        {body}
+      </div>
+    </div>
+  );
+}
+
+function Closing({ title, note, onClose }: { title: string; note?: string; onClose: () => void }) {
+  const { t } = useI18n();
+  return (
+    <>
+      <h2 id="clean-title" class="text-xl font-semibold">
+        {title}
+      </h2>
+      {note && <p class="mt-2 text-sm text-gray-300">{note}</p>}
+      <div class="mt-4 flex justify-end">
+        <AutoFocusButton class={secondaryButton} onClick={onClose} label={t.close} />
+      </div>
+    </>
   );
 }

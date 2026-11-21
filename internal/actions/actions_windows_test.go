@@ -73,7 +73,6 @@ func TestGuardBlocksSystemPaths(t *testing.T) {
 		// Contiene carpetas vitales del sistema simulado.
 		root,
 		filepath.Dir(root),
-		`Z:\proyecto\node_modules`,
 	}
 	for _, path := range blocked {
 		_, err := guard.Check(path, true)
@@ -86,6 +85,34 @@ func TestGuardBlocksSystemPaths(t *testing.T) {
 	writeFile(t, inside, "x")
 	if _, err := guard.Check(inside, true); err != nil {
 		t.Errorf("%s: %v", inside, err)
+	}
+}
+
+// Lo mismo vale fuera del disco del sistema, aunque este equipo solo tenga uno.
+func TestProtectedOnOtherDrives(t *testing.T) {
+	env := rules.Env{
+		SystemDrive: "C:", Windir: `C:\Windows`, Home: `C:\Users\ana`,
+		SyncRoots: []string{`D:\Datos\Nube`},
+	}
+	blocked := []string{
+		`D:\`, `d:\windows`, `D:\Windows\x.dll`, `D:\Program Files\App`, `D:\Program Files (x86)\App`,
+		`D:\ProgramData\x`, `D:\$Recycle.Bin\S-1\x`, `D:\System Volume Information\x`, `D:\pagefile.sys`,
+		`D:\Users`, `D:\OneDrive`, `D:\Dropbox`, `D:\OneDrive - Empresa`,
+		`D:\Datos`, `D:\Datos\Nube`,
+	}
+	for _, path := range blocked {
+		if !isProtected(env, path) {
+			t.Errorf("%s debía estar protegida", path)
+		}
+	}
+	allowed := []string{
+		`D:\proyecto\node_modules`, `D:\Users\ana\viejo.iso`, `D:\OneDrive\a.txt`, `D:\Datos\Nube\a.txt`,
+		`D:\Datos2`, `D:\windows2\a`, `Z:\a`,
+	}
+	for _, path := range allowed {
+		if isProtected(env, path) {
+			t.Errorf("%s no debía estar protegida", path)
+		}
 	}
 }
 
@@ -192,6 +219,85 @@ func TestGuardComparesAgainstScan(t *testing.T) {
 	guard.Scanned = func(string) (bool, bool) { return true, true }
 	if _, err := guard.Check(path, true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Lo que no cabe se rechaza sin tocarlo, y lo que sí cabe sigue adelante.
+func TestCleanerNeverOverflowsRecycleBin(t *testing.T) {
+	root := tempDir(t)
+	first, big, last := filepath.Join(root, "1.bin"), filepath.Join(root, "2.bin"), filepath.Join(root, "3.bin")
+	writeFile(t, first, "12345")
+	writeFile(t, big, "123456")
+	writeFile(t, last, "12345")
+	var trashed []string
+	cleaner := fakeCleaner(root, &trashed)
+	queries := 0
+	cleaner.Room = func(string) (int64, error) {
+		queries++
+		return 10, nil
+	}
+
+	outcomes := run(context.Background(), cleaner, []Request{
+		{Path: first, Method: MethodTrash}, {Path: big, Method: MethodTrash}, {Path: last, Method: MethodTrash},
+	})
+	if outcomes[0].Status != StatusDone || outcomes[2].Status != StatusDone {
+		t.Fatalf("%+v", outcomes)
+	}
+	if outcomes[1].Status != StatusRefused || outcomes[1].Code != CodeBinFull {
+		t.Fatalf("%+v", outcomes[1])
+	}
+	if !slices.Equal(trashed, []string{first, last}) {
+		t.Fatalf("trashed = %v", trashed)
+	}
+	if queries != 1 {
+		t.Fatalf("midió %d veces", queries)
+	}
+}
+
+// Un fallo al mover no consume espacio de la papelera.
+func TestCleanerFailedMoveDoesNotUseRoom(t *testing.T) {
+	root := tempDir(t)
+	failing, good := filepath.Join(root, "1.bin"), filepath.Join(root, "2.bin")
+	writeFile(t, failing, "12345")
+	writeFile(t, good, "12345")
+	var trashed []string
+	cleaner := fakeCleaner(root, &trashed)
+	cleaner.Room = func(string) (int64, error) { return 5, nil }
+	inner := cleaner.Trash
+	cleaner.Trash = func(path string, canceled func() bool) (string, error) {
+		if path == failing {
+			return "", ErrInUse
+		}
+		return inner(path, canceled)
+	}
+
+	outcomes := run(context.Background(), cleaner, []Request{{Path: failing, Method: MethodTrash}, {Path: good, Method: MethodTrash}})
+	if outcomes[0].Code != CodeInUse || outcomes[1].Status != StatusDone {
+		t.Fatalf("%+v", outcomes)
+	}
+}
+
+// Sin saber cuánto cabe, no se arriesga.
+func TestCleanerRefusesWhenRoomIsUnknown(t *testing.T) {
+	root := tempDir(t)
+	path := filepath.Join(root, "1.bin")
+	writeFile(t, path, "1")
+	var trashed []string
+	cleaner := fakeCleaner(root, &trashed)
+	cleaner.Room = func(string) (int64, error) { return 0, errors.New("sin datos") }
+	outcome := run(context.Background(), cleaner, []Request{{Path: path, Method: MethodTrash}})[0]
+	if outcome.Status == StatusDone || len(trashed) != 0 {
+		t.Fatalf("%+v, trashed = %v", outcome, trashed)
+	}
+}
+
+func TestRecycleBinSpaceReadsThisSystem(t *testing.T) {
+	space, err := RecycleBinSpace(tempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !space.Known || space.Capacity <= 0 || space.Used < 0 || space.Room < 0 || space.Room > space.Capacity {
+		t.Fatalf("%+v", space)
 	}
 }
 

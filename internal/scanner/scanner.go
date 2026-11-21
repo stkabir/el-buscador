@@ -22,6 +22,12 @@ const (
 	// Una carpeta casi igual a su mayor subcarpeta no aporta nada a la lista.
 	passThroughRatio = 0.9
 	unreadableSample = 20
+	// MinCandidateSize es lo mínimo para buscar copias: lo menor es mucho ruido y poco
+	// espacio.
+	MinCandidateSize = 1024 * 1024
+	// maxTreeChildren limita cada nivel del mapa: lo demás no se distinguiría a simple
+	// vista y se junta en Other.
+	maxTreeChildren = 40
 )
 
 // Entry es un archivo o carpeta. Size es lo que ocupa en disco y Cloud lo que
@@ -35,6 +41,39 @@ type Entry struct {
 	IsDir bool   `json:"isDir"`
 	// Unreadable indica una carpeta que no se pudo abrir: su tamaño es desconocido.
 	Unreadable bool `json:"unreadable"`
+}
+
+// Candidate es un archivo que podría tener copias. Solo se guardan los que importan,
+// porque el escaneo descarta casi todos los archivos.
+type Candidate struct {
+	dir  *node
+	name string
+	// Size es el tamaño real del contenido y Allocated lo que ocupa en disco.
+	Size      int64
+	Allocated int64
+	// Modified es el FILETIME de la última modificación.
+	Modified  int64
+	CloudOnly bool
+}
+
+// Path devuelve la ruta del archivo.
+func (c Candidate) Path() string { return c.dir.join(c.name) }
+
+// TreeNode es un elemento del mapa del disco. Other suma lo que no se lista aparte.
+type TreeNode struct {
+	Name     string     `json:"name"`
+	Path     string     `json:"path"`
+	Size     int64      `json:"size"`
+	IsDir    bool       `json:"isDir"`
+	Other    int64      `json:"other"`
+	Children []TreeNode `json:"children"`
+}
+
+// Options ajusta un escaneo.
+type Options struct {
+	// SkipCandidates dice qué carpetas no aportan candidatos, por nombre. Se siguen
+	// midiendo igual.
+	SkipCandidates func(name string) bool
 }
 
 // Summary resume un escaneo terminado.
@@ -90,9 +129,13 @@ func (t *Tracker) Snapshot() Progress {
 
 // Result guarda el árbol de un escaneo para poder navegarlo.
 type Result struct {
-	root    *node
-	summary Summary
+	candidates []Candidate
+	root       *node
+	summary    Summary
 }
+
+// Candidates devuelve los archivos que podrían tener copias.
+func (r *Result) Candidates() []Candidate { return r.candidates }
 
 // Summary devuelve el resumen del escaneo.
 func (r *Result) Summary() Summary { return r.summary }
@@ -127,6 +170,55 @@ func (r *Result) Listing(path string) (Listing, error) {
 		})
 	}
 	return listing, nil
+}
+
+// Tree devuelve una carpeta con depth niveles de contenido, de mayor a menor.
+func (r *Result) Tree(path string, depth int) (TreeNode, string, error) {
+	n := r.root.find(path)
+	if n == nil {
+		return TreeNode{}, "", fmt.Errorf("carpeta no encontrada: %s", path)
+	}
+	parent := ""
+	if n.parent != nil {
+		parent = n.parent.path()
+	}
+	return n.tree(depth), parent, nil
+}
+
+func (n *node) tree(depth int) TreeNode {
+	result := TreeNode{Name: n.name, Path: n.path(), Size: n.totalSize, IsDir: true, Children: []TreeNode{}}
+	if depth <= 0 {
+		return result
+	}
+	children := make([]TreeNode, 0, len(n.children)+len(n.files))
+	for _, child := range n.children {
+		if child.totalSize == 0 {
+			continue
+		}
+		// Una carpeta que es casi todo su padre no aporta nada que ver: no gasta nivel.
+		// Así C:\ muestra lo que hay en tu perfil, y no solo Users y tu nombre.
+		next := depth - 1
+		if float64(child.totalSize) >= passThroughRatio*float64(n.totalSize) {
+			next = depth
+		}
+		children = append(children, child.tree(next))
+	}
+	for _, file := range n.files {
+		if file.size > 0 {
+			children = append(children, TreeNode{Name: file.name, Path: n.join(file.name), Size: file.size})
+		}
+	}
+	slices.SortFunc(children, func(a, b TreeNode) int { return compareDesc(a.Size, b.Size) })
+
+	result.Other = n.otherSize
+	if len(children) > maxTreeChildren {
+		for _, rest := range children[maxTreeChildren:] {
+			result.Other += rest.Size
+		}
+		children = children[:maxTreeChildren]
+	}
+	result.Children = children
+	return result
 }
 
 // WalkDirs recorre las carpetas bajo la raíz, sin incluirla. Si visit devuelve
@@ -213,6 +305,8 @@ type node struct {
 	ownLatest   int64
 	totalLatest int64
 	unreadable  bool
+	// noCandidates viene de la carpeta o de alguna de arriba.
+	noCandidates bool
 }
 
 func (n *node) path() string {
@@ -320,11 +414,20 @@ type walker struct {
 
 	samplesMu sync.Mutex
 	samples   []string
+
+	skipCandidates func(name string) bool
+	candidatesMu   sync.Mutex
+	candidates     []Candidate
 }
 
 // Scan recorre root y devuelve su árbol. Devuelve el error del contexto si se
 // cancela. tracker recibe el avance y puede ser nil.
 func Scan(ctx context.Context, root string, tracker *Tracker) (*Result, error) {
+	return ScanWith(ctx, root, tracker, Options{})
+}
+
+// ScanWith es Scan con opciones.
+func ScanWith(ctx context.Context, root string, tracker *Tracker, options Options) (*Result, error) {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("ruta %q: %w", root, err)
@@ -339,6 +442,8 @@ func Scan(ctx context.Context, root string, tracker *Tracker) (*Result, error) {
 		tracker: tracker,
 		sem:     make(chan struct{}, max(4, min(runtime.NumCPU(), 16))),
 		seen:    make(map[int64]struct{}),
+
+		skipCandidates: options.SkipCandidates,
 	}
 	rootNode := &node{name: abs}
 	w.visit(rootNode)
@@ -363,7 +468,8 @@ func Scan(ctx context.Context, root string, tracker *Tracker) (*Result, error) {
 	slices.SortFunc(topFiles, func(a, b Entry) int { return compareDesc(a.Size, b.Size) })
 
 	return &Result{
-		root: rootNode,
+		root:       rootNode,
+		candidates: w.candidates,
 		summary: Summary{
 			Root:       abs,
 			Size:       rootNode.totalSize,
@@ -413,7 +519,8 @@ func (w *walker) read(n *node) {
 	err := readDir(path, func(e rawEntry) {
 		switch classify(e.attrs, e.tag) {
 		case kindDir:
-			n.children = append(n.children, &node{name: e.name, parent: n})
+			skip := n.noCandidates || (w.skipCandidates != nil && w.skipCandidates(e.name))
+			n.children = append(n.children, &node{name: e.name, parent: n, noCandidates: skip})
 		case kindLink:
 			w.links.Add(1)
 		case kindFile:
@@ -430,6 +537,12 @@ func (w *walker) read(n *node) {
 			w.tracker.files.Add(1)
 			w.tracker.size.Add(size)
 			w.offerTop(n, e.name, size, cloud)
+			if !n.noCandidates && e.endOfFile >= MinCandidateSize && comparable(e.attrs, e.tag) {
+				w.addCandidate(Candidate{
+					dir: n, name: e.name, Size: e.endOfFile, Allocated: e.allocated,
+					Modified: e.modified, CloudOnly: e.attrs&cloudOnlyAttrs != 0,
+				})
+			}
 		}
 	})
 	if err != nil && !isGone(err) {
@@ -451,6 +564,12 @@ func (w *walker) read(n *node) {
 		files = slices.Clone(files[:dirFilesLimit])
 	}
 	n.files = files
+}
+
+func (w *walker) addCandidate(candidate Candidate) {
+	w.candidatesMu.Lock()
+	defer w.candidatesMu.Unlock()
+	w.candidates = append(w.candidates, candidate)
 }
 
 // isRepeated indica si el ID ya se vio: es otro hard link del mismo archivo. Un

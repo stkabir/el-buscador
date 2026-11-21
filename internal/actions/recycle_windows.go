@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -19,39 +20,85 @@ const (
 	defaultBinPercent = 5
 )
 
-// checkRecycleBin revisa si la papelera del disco aceptaría size bytes. Es solo un
-// aviso temprano: la garantía final es el veto de MoveToTrash.
-func checkRecycleBin(path string, size int64) error {
-	root := filepath.VolumeName(path) + `\`
-	wide, err := windows.UTF16PtrFromString(root)
+// BinSpace describe la papelera de un disco. Room es lo que cabe sin que Windows
+// descarte, de forma permanente, lo más viejo que ya tiene.
+type BinSpace struct {
+	Capacity int64 `json:"capacity"`
+	Used     int64 `json:"used"`
+	Room     int64 `json:"room"`
+	Known    bool  `json:"known"`
+}
+
+// binSettings lee si la papelera está desactivada y su capacidad.
+func binSettings(path string) (off bool, capacity int64, err error) {
+	wide, err := windows.UTF16PtrFromString(filepath.VolumeName(path) + `\`)
 	if err != nil {
-		return err
+		return false, 0, err
 	}
 	var free, total uint64
 	if err := windows.GetDiskFreeSpaceEx(wide, &free, &total, nil); err != nil {
-		return fmt.Errorf("leer disco: %w", err)
+		return false, 0, fmt.Errorf("leer disco: %w", err)
 	}
-	capacity := int64(total / 100 * defaultBinPercent)
+	capacity = int64(total / 100 * defaultBinPercent)
 
 	buffer := make([]uint16, 64)
 	if err := windows.GetVolumeNameForVolumeMountPoint(wide, &buffer[0], uint32(len(buffer))); err != nil {
-		return binAllows(false, capacity, size)
+		return false, capacity, nil
 	}
 	volume := strings.TrimSuffix(strings.TrimPrefix(windows.UTF16ToString(buffer), `\\?\Volume`), `\`)
 	key, err := registry.OpenKey(registry.CURRENT_USER, bitBucketKey+volume, registry.QUERY_VALUE)
 	if err != nil {
-		return binAllows(false, capacity, size)
+		return false, capacity, nil
 	}
 	defer key.Close()
 
-	nuke, _, err := key.GetIntegerValue("NukeOnDelete")
-	if err != nil {
-		nuke = 0
+	if nuke, _, err := key.GetIntegerValue("NukeOnDelete"); err == nil {
+		off = nuke != 0
 	}
 	if maxMB, _, err := key.GetIntegerValue("MaxCapacity"); err == nil {
 		capacity = int64(maxMB) * mb
 	}
-	return binAllows(nuke != 0, capacity, size)
+	return off, capacity, nil
+}
+
+// checkRecycleBin revisa si la papelera del disco aceptaría size bytes. Es solo un
+// aviso temprano: la garantía final es el veto de MoveToTrash.
+func checkRecycleBin(path string, size int64) error {
+	off, capacity, err := binSettings(path)
+	if err != nil {
+		return err
+	}
+	return binAllows(off, capacity, size)
+}
+
+// shQueryRBInfo refleja SHQUERYRBINFO en 64 bits.
+type shQueryRBInfo struct {
+	size     uint32
+	_        uint32
+	binBytes int64
+	binItems int64
+}
+
+// RecycleBinSpace mide la papelera del disco donde está path.
+func RecycleBinSpace(path string) (BinSpace, error) {
+	off, capacity, err := binSettings(path)
+	if err != nil {
+		return BinSpace{}, err
+	}
+	root, err := windows.UTF16PtrFromString(filepath.VolumeName(path) + `\`)
+	if err != nil {
+		return BinSpace{}, err
+	}
+	info := shQueryRBInfo{size: uint32(unsafe.Sizeof(shQueryRBInfo{}))}
+	r, _, _ := procSHQueryRecycleBin.Call(uintptr(unsafe.Pointer(root)), uintptr(unsafe.Pointer(&info)))
+	if failed(uint32(r)) {
+		return BinSpace{}, fmt.Errorf("leer la papelera: 0x%08X", uint32(r))
+	}
+	space := BinSpace{Capacity: capacity, Used: info.binBytes, Known: true}
+	if !off {
+		space.Room = max(capacity-info.binBytes, 0)
+	}
+	return space, nil
 }
 
 func binAllows(off bool, capacity, size int64) error {

@@ -69,6 +69,41 @@ try {
   await sleep(300);
   await shot("4-carpetas");
 
+  await click("Mapa");
+  await waitFor("Sin clasificar", 3000);
+  await sleep(400);
+  await shot("10-mapa");
+  const before = await evaluate("document.querySelectorAll('[data-map-dir]').length");
+  const entered = await evaluate("(() => { const b = document.querySelector('[data-map-dir]'); if (!b) return null; const p = b.dataset.mapDir; b.click(); return p; })()");
+  if (!before || !entered) throw new Error("El mapa no dibujó carpetas");
+  await waitFor(entered, 3000);
+  await sleep(400);
+  await shot("11-mapa-subcarpeta");
+  console.log("Mapa:", before, "carpetas; entró a", entered);
+  await click("Subir");
+  await sleep(300);
+
+  await click("Carpetas");
+  await sleep(300);
+  const freeUp = await evaluate("(() => { const b = document.querySelector('[data-free-up]'); if (!b) return null; const p = b.dataset.freeUp; b.click(); return p; })()");
+  if (freeUp) {
+    await waitFor(freeUp === null ? "" : "Cerrar", 100).catch(() => {});
+    const startPreview = Date.now();
+    while (Date.now() - startPreview < 60000) {
+      const screen = await text();
+      if (screen.includes("¿Liberar hasta") || screen.includes("No hay nada que liberar")) break;
+      await sleep(200);
+    }
+    await sleep(200);
+    await shot("12-liberar-vista-previa");
+    const screen = await text();
+    console.log("Liberar espacio, vista previa de", freeUp, ":", screen.slice(screen.search(/¿Liberar hasta|No hay nada que liberar/), screen.search(/¿Liberar hasta|No hay nada que liberar/) + 260).replace(/\n+/g, " | "));
+    await click(screen.includes("¿Liberar hasta") ? "Cancelar" : "Cerrar");
+    await sleep(200);
+  } else {
+    console.log("Liberar espacio: sin carpetas sincronizadas en esta lista");
+  }
+
   await click("Basura dev");
   await waitFor("Cachés de herramientas", 3000);
   await sleep(300);

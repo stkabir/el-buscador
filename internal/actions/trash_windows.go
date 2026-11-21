@@ -68,6 +68,7 @@ var (
 	shell32                     = windows.NewLazySystemDLL("shell32.dll")
 	procCoCreateInstance        = ole32.NewProc("CoCreateInstance")
 	procCreateItemFromParseName = shell32.NewProc("SHCreateItemFromParsingName")
+	procSHQueryRecycleBin       = shell32.NewProc("SHQueryRecycleBinW")
 )
 
 // comCall llama al método index de la tabla virtual de un objeto COM.

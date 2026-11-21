@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"el-buscador/internal/devtrash"
@@ -41,6 +42,17 @@ type FolderView struct {
 	Advice map[string]rules.Advice `json:"advice"`
 }
 
+// TreeView es el mapa de una carpeta con sus recomendaciones por ruta.
+type TreeView struct {
+	Node   scanner.TreeNode        `json:"node"`
+	Parent string                  `json:"parent"`
+	Advice map[string]rules.Advice `json:"advice"`
+}
+
+// treeDepth son los niveles del mapa: uno solo no deja ver qué hay dentro de cada
+// carpeta, y más se vuelve ilegible.
+const treeDepth = 2
+
 // ScanService ejecuta un escaneo a la vez y guarda el último resultado.
 type ScanService struct {
 	mu       sync.Mutex
@@ -52,15 +64,19 @@ type ScanService struct {
 	catalog  *rules.Catalog
 	report   devtrash.Report
 	findings map[string]devtrash.Finding
+	// generation cambia con cada escaneo: invalida lo calculado sobre el anterior.
+	generation int
+	// drive es el disco del último escaneo pedido, como "D:".
+	drive string
 }
 
 func (s *ScanService) isRunning() bool {
 	return s.state == stateScanning || s.state == stateAnalyzing
 }
 
-// Start escanea el disco del sistema en segundo plano. Si ya hay un escaneo en
-// curso, no hace nada.
-func (s *ScanService) Start() error {
+// Start escanea un disco en segundo plano; sin indicar uno, el del sistema. Si ya hay
+// un escaneo en curso, no hace nada.
+func (s *ScanService) Start(drive string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.isRunning() {
@@ -71,11 +87,22 @@ func (s *ScanService) Start() error {
 	if err != nil {
 		return err
 	}
+	if drive != "" {
+		// Solo discos fijos de este equipo: nunca una ruta que mande la interfaz.
+		if !disk.IsFixed(drive) {
+			return fmt.Errorf("disco no disponible: %s", drive)
+		}
+		if usage, err = disk.Of(drive); err != nil {
+			return err
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	tracker := &scanner.Tracker{}
 	catalog := rules.New(rules.EnvFromOS())
 	s.state, s.err, s.tracker, s.cancel, s.result = stateScanning, "", tracker, cancel, nil
+	s.generation++
+	s.drive = usage.Drive
 
 	go func() {
 		defer cancel()
@@ -83,7 +110,7 @@ func (s *ScanService) Start() error {
 		if scanRootOverride != "" {
 			root = scanRootOverride
 		}
-		result, err := scanner.Scan(ctx, root, tracker)
+		result, err := scanner.ScanWith(ctx, root, tracker, scanner.Options{SkipCandidates: devtrash.SkipForDuplicates})
 
 		var report devtrash.Report
 		if err == nil {
@@ -171,6 +198,29 @@ func (s *ScanService) Listing(path string) (FolderView, error) {
 	return FolderView{Listing: listing, Advice: advice}, nil
 }
 
+// Tree devuelve el mapa de una carpeta del último escaneo.
+func (s *ScanService) Tree(path string) (TreeView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.result == nil {
+		return TreeView{}, errNoScan
+	}
+	node, parent, err := s.result.Tree(path, treeDepth)
+	if err != nil {
+		return TreeView{}, err
+	}
+	advice := make(map[string]rules.Advice)
+	var collect func(scanner.TreeNode)
+	collect = func(item scanner.TreeNode) {
+		s.addAdvice(advice, []scanner.Entry{{Path: item.Path, IsDir: item.IsDir}})
+		for _, child := range item.Children {
+			collect(child)
+		}
+	}
+	collect(node)
+	return TreeView{Node: node, Parent: parent, Advice: advice}, nil
+}
+
 var errNoScan = errors.New("no hay escaneo terminado")
 
 // addAdvice agrega lo que se sabe de cada ruta. Lo detectado como basura dev manda
@@ -233,4 +283,32 @@ func (s *ScanService) classify(ctx context.Context, path string, isDir bool) (ru
 		return devtrash.Recheck(ctx, finding, catalog)
 	}
 	return catalog.Explain(path, isDir)
+}
+
+// candidates devuelve los archivos que podrían tener copias y de qué escaneo son.
+func (s *ScanService) candidates() ([]scanner.Candidate, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.result == nil {
+		return nil, s.generation, errNoScan
+	}
+	return s.result.Candidates(), s.generation, nil
+}
+
+func (s *ScanService) currentGeneration() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.generation
+}
+
+func (s *ScanService) currentCatalog() *rules.Catalog {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.catalog
+}
+
+func (s *ScanService) scannedDrive() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.drive
 }

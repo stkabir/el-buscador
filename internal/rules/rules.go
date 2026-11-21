@@ -37,6 +37,9 @@ type Advice struct {
 	Reason Text  `json:"reason"`
 	Action Text  `json:"action"`
 	Manual bool  `json:"manual"`
+	// Synced indica que se sincroniza: borrarlo llega a la nube, y se puede liberar
+	// sin borrar.
+	Synced bool `json:"synced"`
 }
 
 // Env son las carpetas del sistema contra las que se comparan las rutas.
@@ -48,6 +51,9 @@ type Env struct {
 	Home         string
 	LocalAppData string
 	AppData      string
+	// SyncRoots son carpetas sincronizadas que Windows declara, como OneDrive, que
+	// pueden estar en cualquier disco.
+	SyncRoots []string
 }
 
 // EnvFromOS lee las carpetas del sistema actual.
@@ -60,6 +66,7 @@ func EnvFromOS() Env {
 		Home:         os.Getenv("USERPROFILE"),
 		LocalAppData: os.Getenv("LOCALAPPDATA"),
 		AppData:      os.Getenv("APPDATA"),
+		SyncRoots:    []string{os.Getenv("OneDrive"), os.Getenv("OneDriveConsumer"), os.Getenv("OneDriveCommercial")},
 	}
 }
 
@@ -174,22 +181,38 @@ func (c *Catalog) add(base, rel string, inherit bool, advice Advice) {
 // Env devuelve las carpetas con las que se creó el catálogo.
 func (c *Catalog) Env() Env { return c.env }
 
-// IsSynced indica si la ruta está dentro de una carpeta sincronizada con la nube.
+// IsSynced indica si la ruta está dentro de una carpeta sincronizada con la nube. La
+// busca en lo que Windows declara, en el perfil y en la raíz de cada disco, porque es
+// donde estos programas se instalan.
 func (c *Catalog) IsSynced(path string) bool {
-	if c.env.Home == "" {
-		return false
-	}
-	home := normalize(c.env.Home) + `\`
 	norm := normalize(path)
-	if !strings.HasPrefix(norm, home) {
+	for _, root := range c.env.SyncRoots {
+		if root != "" && (norm == normalize(root) || strings.HasPrefix(norm, normalize(root)+`\`)) {
+			return true
+		}
+	}
+	if c.env.Home != "" {
+		home := normalize(c.env.Home) + `\`
+		if strings.HasPrefix(norm, home) {
+			first, _, _ := strings.Cut(norm[len(home):], `\`)
+			return IsSyncFolderName(first)
+		}
+	}
+	volume := filepath.VolumeName(norm)
+	if volume == "" || len(norm) <= len(volume)+1 {
 		return false
 	}
-	first, _, _ := strings.Cut(norm[len(home):], `\`)
-	switch first {
+	first, _, _ := strings.Cut(norm[len(volume)+1:], `\`)
+	return IsSyncFolderName(first)
+}
+
+// IsSyncFolderName reconoce el nombre de una carpeta sincronizada, en minúsculas.
+func IsSyncFolderName(name string) bool {
+	switch name {
 	case "iclouddrive", "icloudphotos", "dropbox", "google drive":
 		return true
 	}
-	return strings.HasPrefix(first, "onedrive")
+	return strings.HasPrefix(name, "onedrive")
 }
 
 // SyncedWarning explica qué pasa al borrar en una carpeta sincronizada.
@@ -247,8 +270,9 @@ func (c *Catalog) Explain(path string, isDir bool) (Advice, bool) {
 	if c.IsSynced(path) {
 		return Advice{
 			Level:  LevelReview,
+			Synced: true,
 			Reason: SyncedWarning(),
-			Action: Text{"Para ganar espacio sin perderlo, haz clic derecho y elige Liberar espacio.", "To gain space without losing it, right-click and choose Free up space."},
+			Action: Text{"Para ganar espacio sin perderlo, usa Liberar espacio.", "To gain space without losing it, use Free up space."},
 		}, true
 	}
 

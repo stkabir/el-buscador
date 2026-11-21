@@ -185,7 +185,7 @@ func TestStartRefusedWhileScanning(t *testing.T) {
 
 func TestOutputKeepsOnlyTheEnd(t *testing.T) {
 	service := &CleanupService{scan: &ScanService{}}
-	writer := cleanOutput{service}
+	writer := cleanOutput{&service.job}
 	writer.Write([]byte(strings.Repeat("a", maxCleanOutput)))
 	writer.Write([]byte("fin"))
 	output := service.Status().Output
@@ -197,5 +197,63 @@ func TestOutputKeepsOnlyTheEnd(t *testing.T) {
 func TestServiceDoesNotExposeWriteToFrontend(t *testing.T) {
 	if _, ok := any(&CleanupService{}).(interface{ Write([]byte) (int, error) }); ok {
 		t.Fatal("Wails expondría Write a la interfaz")
+	}
+}
+
+func TestPlanReportsBinAndStartRefusesOverflow(t *testing.T) {
+	binRoomOverride = 0
+	t.Cleanup(func() { binRoomOverride = -1 })
+
+	root := fixture(t, "a.bin")
+	path := filepath.Join(root, "a.bin")
+	service := scannedService(t, root)
+
+	plan, err := service.Plan([]string{path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Bin.Room != 0 || plan.TrashTotal != plan.Items[0].Size {
+		t.Fatalf("%+v", plan)
+	}
+	if err := service.Start([]CleanRequest{{Path: path, Method: actions.MethodTrash}}); err != nil {
+		t.Fatal(err)
+	}
+	status := waitDone(t, service)
+	if status.Outcomes[0].Code != actions.CodeBinFull {
+		t.Fatalf("%+v", status.Outcomes)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("no debía tocarlo: %v", err)
+	}
+}
+
+func TestPlanCommandDoesNotCountForBin(t *testing.T) {
+	root := fixture(t, "cache/a.bin")
+	cache := filepath.Join(root, "cache")
+	plan, err := scannedService(t, root, cacheFinding(cache, "cmd", "/c", "echo hola")).Plan([]string{cache})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.TrashTotal != 0 {
+		t.Fatalf("%+v", plan)
+	}
+}
+
+func TestFreeUpRefusesOutsideSyncAndScan(t *testing.T) {
+	root := fixture(t, "carpeta/a.bin")
+	folder := filepath.Join(root, "carpeta")
+	service := scannedService(t, root)
+	// La carpeta temporal no se sincroniza: ni la vista previa ni la acción avanzan.
+	if got := service.FreeUpPreview(folder); got.Code != actions.CodeNotSynced || got.Files != 0 {
+		t.Fatalf("%+v", got)
+	}
+	if got := service.FreeUp(folder); got.Code != actions.CodeNotSynced || got.Files != 0 {
+		t.Fatalf("%+v", got)
+	}
+	if got := service.FreeUp(filepath.Join(root, "no-escaneada")); got.Code != actions.CodeNotScanned {
+		t.Fatalf("%+v", got)
+	}
+	if got := (&CleanupService{scan: &ScanService{}}).FreeUp(folder); got.Code != actions.CodeNotScanned {
+		t.Fatalf("%+v", got)
 	}
 }

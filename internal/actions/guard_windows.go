@@ -30,6 +30,9 @@ const (
 	CodeNeedsConfirm Code = "needsConfirm"
 	CodeTooBig       Code = "tooBig"
 	CodeBinOff       Code = "binOff"
+	// CodeBinFull: cabría en una papelera vacía, pero hoy haría que Windows descarte
+	// lo que ya tiene.
+	CodeBinFull      Code = "binFull"
 	CodeBinRejected  Code = "binRejected"
 	CodeInUse        Code = "inUse"
 	CodeNoPermission Code = "noPermission"
@@ -37,6 +40,10 @@ const (
 	CodeToolFailed   Code = "toolFailed"
 	CodeCanceled     Code = "canceled"
 	CodeFailed       Code = "failed"
+	// CodeNotDuplicate: la copia ya no es idéntica. CodeNoCopyLeft: la copia que se
+	// conserva ya no está intacta, así que borrar dejaría sin ninguna.
+	CodeNotDuplicate Code = "notDuplicate"
+	CodeNoCopyLeft   Code = "noCopyLeft"
 )
 
 // Refused es una negativa a tocar una ruta.
@@ -45,6 +52,9 @@ type Refused struct{ Code Code }
 func (r *Refused) Error() string { return "rechazado: " + string(r.Code) }
 
 func refuse(code Code) error { return &Refused{Code: code} }
+
+// Refuse crea una negativa desde otro paquete.
+func Refuse(code Code) error { return refuse(code) }
 
 // CodeOf devuelve el motivo de una negativa, o "" si err es otra cosa.
 func CodeOf(err error) Code {
@@ -143,27 +153,21 @@ func isPlainDrivePath(path string) bool {
 	return !strings.ContainsAny(path[2:], `:*?"<>|/`)
 }
 
-// systemFolders son rutas que nunca se tocan, ni lo que tienen dentro.
+// rootFolders son nombres que nunca se tocan, ni lo que tienen dentro, en la raíz de
+// cualquier disco: un programa instalado en D: se rompe igual que en C:.
+var rootFolders = []string{
+	"$recycle.bin", "system volume information", "recovery", "boot", "efi",
+	"pagefile.sys", "swapfile.sys", "hiberfil.sys",
+	"windows", "program files", "program files (x86)", "programdata",
+}
+
+// systemFolders son las carpetas de este Windows, estén donde estén.
 func systemFolders(env rules.Env) []string {
-	drive := env.SystemDrive + `\`
-	folders := []string{
-		env.Windir, env.ProgramData,
-		filepath.Join(drive, `$Recycle.Bin`),
-		filepath.Join(drive, `System Volume Information`),
-		filepath.Join(drive, `Recovery`),
-		filepath.Join(drive, `Boot`),
-		filepath.Join(drive, `EFI`),
-		filepath.Join(drive, `pagefile.sys`),
-		filepath.Join(drive, `swapfile.sys`),
-		filepath.Join(drive, `hiberfil.sys`),
-	}
+	folders := []string{env.Windir, env.ProgramData}
 	return append(folders, env.ProgramFiles...)
 }
 
-var homeFolders = []string{
-	"appdata", "desktop", "documents", "downloads", "music", "pictures", "videos",
-	"iclouddrive", "icloudphotos", "dropbox", "google drive",
-}
+var homeFolders = []string{"appdata", "desktop", "documents", "downloads", "music", "pictures", "videos"}
 
 // isProtected bloquea las rutas de sistema. Sin los datos del sistema no se puede
 // saber qué es seguro, así que bloquea todo.
@@ -172,11 +176,18 @@ func isProtected(env rules.Env, path string) bool {
 		return true
 	}
 	norm := strings.ToLower(path)
-	// Hoy solo se escanea el disco del sistema.
-	if !strings.EqualFold(filepath.VolumeName(path), env.SystemDrive) {
+	root := filepath.VolumeName(norm) + `\`
+	if norm == root {
 		return true
 	}
-	if filepath.Dir(norm) == norm {
+
+	relative := norm[len(root):]
+	first, _, _ := strings.Cut(relative, `\`)
+	if slices.Contains(rootFolders, first) {
+		return true
+	}
+	// La carpeta sincronizada completa nunca: borrarla se propaga a toda la nube.
+	if first == relative && (first == "users" || rules.IsSyncFolderName(first)) {
 		return true
 	}
 
@@ -192,7 +203,8 @@ func isProtected(env rules.Env, path string) bool {
 	}
 
 	// Una carpeta que contiene algo vital tampoco se puede borrar.
-	for _, vital := range append(folders, env.Home, env.LocalAppData, env.AppData) {
+	vitals := append(folders, env.Home, env.LocalAppData, env.AppData)
+	for _, vital := range append(vitals, env.SyncRoots...) {
 		if vital != "" && strings.HasPrefix(strings.ToLower(filepath.Clean(vital))+`\`, norm+`\`) {
 			return true
 		}
@@ -204,7 +216,7 @@ func isProtected(env rules.Env, path string) bool {
 		return true // un perfil de usuario, o AppData\Local y similares
 	case home:
 		name := filepath.Base(norm)
-		return slices.Contains(homeFolders, name) || strings.HasPrefix(name, "onedrive")
+		return slices.Contains(homeFolders, name) || rules.IsSyncFolderName(name)
 	}
 	return false
 }
