@@ -146,6 +146,10 @@ func TestScanReportsUnreadableFolders(t *testing.T) {
 		}
 	})
 
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("este usuario ignora la denegación (administrador): no se puede simular una carpeta bloqueada")
+	}
+
 	result := scan(t, root)
 	summary := result.Summary()
 	if summary.Unreadable != 1 || summary.Files != 0 {
