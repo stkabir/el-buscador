@@ -286,7 +286,7 @@ func TestCancelKeepsWhatItFound(t *testing.T) {
 	}
 }
 
-// cancelReader cancela tras terminar cierto número de hashes completos, en orden.
+// cancelReader cancela tras terminar cierto número de hashes completos de archivos grandes.
 type cancelReader struct {
 	DiskReader
 	cancelAfter int64
@@ -295,11 +295,12 @@ type cancelReader struct {
 }
 
 func (r *cancelReader) Full(ctx context.Context, file File, onBytes func(int64)) (string, error) {
-	if r.full.Load() >= r.cancelAfter {
+	big := file.Size >= 2*testSize
+	if big && r.full.Load() >= r.cancelAfter {
 		return "", context.Canceled
 	}
 	hash, err := r.DiskReader.Full(ctx, file, onBytes)
-	if r.full.Add(1) >= r.cancelAfter {
+	if big && r.full.Add(1) >= r.cancelAfter {
 		r.cancel()
 	}
 	return hash, err
